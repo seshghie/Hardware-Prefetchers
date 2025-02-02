@@ -1,0 +1,79 @@
+#include "cache.h"
+#include <unordered_map>
+#include <vector>
+
+#define GHB_SIZE 256
+#define IT_SIZE 256
+
+// Struct for GHB entries
+struct GHBEntry
+{
+  // Cacheline address
+  uint64_t addr;
+  // Pointer to prev entry in GHB for same PC
+  int prev;
+};
+
+// IT mapping PC to GHB indices
+std::unordered_map<uint64_t, int> IT;
+// GHB as circular buffer
+std::vector<GHBEntry> GHB(GHB_SIZE);
+// Pointer to current head in GHB
+int ghb_head = 0;
+
+void CACHE::l2c_prefetcher_initialize()
+{
+  IT.clear();
+  ghb_head = 0;
+  // Init GHB entries with default values
+  GHB.resize(GHB_SIZE, {0, -1});
+}
+
+uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint32_t metadata_in)
+{
+  // Retrieve prev GHB entry for this PC and point IT to current GHB entry
+  int prev_index = IT[ip];
+  IT[ip] = ghb_head;
+
+  // Insert current access into GHB
+  GHB[ghb_head] = {addr, prev_index};
+  // Move GHB head circularly
+  ghb_head = (ghb_head + 1) % GHB_SIZE;
+
+  // Retrieve last 3 addresses accessed by this PC
+  std::vector<uint64_t> addresses;
+  int idx = IT[ip];
+  for (int i = 0; i < 3 && idx != -1; i++)
+  {
+    addresses.push_back(GHB[idx].addr);
+    idx = GHB[idx].prev;
+  }
+
+  // Calculate strides
+  if (addresses.size() == 3)
+  {
+    int64_t stride1 = addresses[1] - addresses[0];
+    int64_t stride2 = addresses[2] - addresses[1];
+        
+    // If strides match issue prefetches with identified stride
+    if (stride1 == stride2)
+    {
+      for (int i = 1; i <= 1; i++)
+      {
+        uint64_t pf_addr = addr + i * stride1;
+        prefetch_line(ip, addr, pf_addr, FILL_L2, 0);
+      }
+    }
+  }
+  return metadata_in;
+}
+
+uint32_t CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in)
+{
+  return metadata_in;
+}
+
+void CACHE::l2c_prefetcher_final_stats()
+{
+
+}

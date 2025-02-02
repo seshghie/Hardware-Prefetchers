@@ -1,0 +1,156 @@
+#include "cache.h"
+
+#define TABLE_SIZE 256
+#define PREFETCH_DEGREE 4
+#define TAG_SIZE 8
+#define TAG_MASK ((1 << TAG_SIZE) - 1)
+class RPTrow {
+public:
+    // Corresponding to the address of the load/store instruction
+    uint64_t tag;
+    // The last (operand) address that was reference when the PC reach that instruction
+    uint64_t prev_address;
+    // The differences between the last 2 address that was generate
+    int64_t last_stride;
+    // two bit encoding of the past history
+    uint32_t state;
+    // Need to keep track of insertion policy
+    uint32_t lru;
+
+    RPTrow() {
+        tag = 0;
+        prev_address = 0;
+        last_stride = 0;
+        state = 0; // 0 for initial, 1 for transient, 2 for steady, 3 for no-pred
+        lru = 0;
+    }
+};
+
+RPTrow RPTtable[TABLE_SIZE];
+
+void CACHE::l1d_prefetcher_initialize() 
+{
+    cout << "CPU " << cpu << " Baseline stride prefetcher" << endl;
+    for (int i=0; i<TABLE_SIZE; i++)
+        RPTtable[i].lru = i;
+}
+
+void CACHE::l1d_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type)
+{
+    // convert address to cache line address
+    uint64_t cl_addr = addr >> LOG2_BLOCK_SIZE;
+    
+    // use IP as the tag
+    uint64_t tag_addr = ip;
+
+    int index = -1;
+    for (index=0; index<TABLE_SIZE; index++) {
+        if (RPTtable[index].tag == tag_addr)
+            break;
+    }
+
+    // This is new IP
+    if (index == TABLE_SIZE) {
+        // find an entry to replace
+        for (index=0; index<TABLE_SIZE; index++) {
+            if (RPTtable[index].lru == (TABLE_SIZE - 1))
+                break;
+        }
+
+        RPTtable[index].tag = tag_addr;
+        RPTtable[index].prev_address = cl_addr;
+        RPTtable[index].last_stride = 0;
+        RPTtable[index].state = 0;
+
+        // update LRU
+        for (int i = 0; i < TABLE_SIZE; i++) {
+            if (RPTtable[i].lru < RPTtable[index].lru) {
+                RPTtable[i].lru++;
+            }
+        }
+        RPTtable[index].lru = 0;
+
+    }
+
+    // sanity check
+    if (index == -1) {
+        assert(0);
+    }
+
+    // Update state machine
+    bool is_correct = ((cl_addr - RPTtable[index].prev_address) == RPTtable[index].last_stride);
+
+    // When incorrect and state is initial
+    if (!is_correct && RPTtable[index].state == 0) {
+        RPTtable[index].last_stride = cl_addr - RPTtable[index].prev_address;
+        RPTtable[index].prev_address = cl_addr;
+        RPTtable[index].state = 1; //Set state to transient
+
+    // When correct and state is initial, transient or steady
+    } else if (is_correct && (
+        (RPTtable[index].state == 0) ||
+        (RPTtable[index].state == 1) ||
+        (RPTtable[index].state == 2) 
+    )) {
+        RPTtable[index].prev_address = cl_addr;
+        RPTtable[index].state = 2; // set State to steady
+
+    // When incorrect and state is steady
+    } else if (!is_correct && (RPTtable[index].state == 2)) {
+        RPTtable[index].prev_address = cl_addr;
+        RPTtable[index].state = 0; // set State to initial 
+
+    // When incorrect and state is transient 
+    } else if (!is_correct && (RPTtable[index].state == 1)) {
+        RPTtable[index].last_stride = cl_addr - RPTtable[index].prev_address;
+        RPTtable[index].prev_address = cl_addr;
+        RPTtable[index].state = 3; //Set state to no-pred 
+    
+    // When correct and state is no-pred 
+    } else if (is_correct && (RPTtable[index].state == 3)) {
+        RPTtable[index].prev_address = cl_addr;
+        RPTtable[index].state = 1; // set State to transient 
+
+    // When incorrect and state is no-pred 
+    } else if (!is_correct && (RPTtable[index].state == 3)) {
+        RPTtable[index].last_stride = cl_addr - RPTtable[index].prev_address;
+        RPTtable[index].prev_address = cl_addr;
+    } 
+
+    // issue prefetch when in steady, transient or initial state
+    if (RPTtable[index].state <= 2) {
+        // do some prefetching
+        for (int i=0; i<PREFETCH_DEGREE; i++) {
+            uint64_t pf_address = (cl_addr + (RPTtable[index].last_stride*(i+1))) << LOG2_BLOCK_SIZE;
+
+            //cout << "The cache line address is " << addr << endl; 
+            //cout << "The stride is " << RPTtable[index].last_stride << endl; 
+            //cout << "The prefetch is " << pf_address << endl; 
+
+            // only issue a prefetch if the prefetch address is in the same 4 KB page 
+            // as the current demand access address
+            if ((pf_address >> LOG2_PAGE_SIZE) != (addr >> LOG2_PAGE_SIZE))
+                break;
+
+            prefetch_line(ip, addr, pf_address, FILL_L1, 0);
+        }
+    }
+
+    // update LRU
+    for (int i = 0; i < TABLE_SIZE; i++) {
+        if (RPTtable[i].lru < RPTtable[index].lru) {
+            RPTtable[i].lru++;
+        }
+    }
+    RPTtable[index].lru = 0;
+}
+
+void CACHE::l1d_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in)
+{
+    //cout << "The acutal address is " << addr << endl;
+}
+
+void CACHE::l1d_prefetcher_final_stats()
+{
+    cout << "CPU " << cpu << " L1 PC-based stride prefetcher final stats" << endl;
+}
